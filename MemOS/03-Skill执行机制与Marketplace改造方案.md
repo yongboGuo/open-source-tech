@@ -1,115 +1,85 @@
-## 1. 先回答你的核心问题
+## TL;DR
 
-如果你在自己的项目里要执行你写好的 skills（代码执行、WebSearch、文件整理、数据分析、商科数据处理），借鉴 MemOS 时要注意：
+1. MemOS 现在没有通用 skill runtime。
+2. 当前“skill 执行”本质是 MCP 固定 tools 调业务方法。
+3. 你可直接借鉴它的工具治理，再补执行沙箱和 marketplace。
 
-- MemOS 当前没有“通用 skill runtime”
-- 它有的是 MCP tools（固定工具）+ prompts（提示模板）
-- 所以可借鉴点是“工具接口治理模式”，不是“skill 引擎本体”
+## 1. 现状：MemOS 的 skill 能力边界
 
-## 2. MemOS 当前的“Skill 执行”到底是什么
+| 模块 | 现状 | 含义 |
+|---|---|---|
+| MCP tools | 固定注册在 `tools_*.go` | 不是动态插件 |
+| MCP prompts | 模板化提示词 `prompts.go` | 引导调用，不负责执行隔离 |
+| AIService | 主要 `Transcribe` | 不等于通用 skill 引擎 |
 
-### 2.1 MCP tools = 固定后端能力
+## 2. 你的场景映射（代码执行/搜索/分析）
 
-在 `server/router/mcp/tools_*.go` 里，工具是代码内注册：
-- `list_memos/get_memo/create_memo/update_memo/delete_memo/search_memos/...`
-- attachments/relations/reactions/tag 也同理
-
-特点：
-- 工具集合由后端发布，非动态安装；
-- 执行本质是调用 APIV1Service / Store；
-- 具备权限与可见性检查。
-
-### 2.2 prompts = 工作流提示，不是可执行插件
-
-`server/router/mcp/prompts.go` 定义了 `capture/review/daily_digest/organize`。
-
-这些 prompt 本质是“引导模型如何调用 tool”的文本模板，不是独立运行时插件。
-
-### 2.3 AIService 目前只做转写
-
-`AIService` 只有 `Transcribe`，并通过 OpenAI/Gemini provider 实现音频转文字。
-
-结论：
-- 当前项目没有代码执行 skill、搜索 skill、数据分析 skill 的可插拔执行框架。
-
-## 3. 借鉴 MemOS 时你该怎么做（实战方案）
-
-### 3.1 可直接借鉴的骨架：MCP 工具治理
-
-MemOS 已经有可复用的治理要素：
-- 工具分组 toolsets（memos/tags/attachments/...）
-- 只读模式（`X-MCP-Readonly`）
-- include/exclude 精细控制
-- PAT/JWT 认证与可见性鉴权
-
-你可以把这套治理结构用于自己的 Skill Gateway。
-
-### 3.2 你需要新增的核心：Skill Runtime
-
-建议引入一个独立执行层：
+你需要的是“可执行 skill 平台”，建议拆为四层：
 
 1. `Skill Registry`
-- 存技能元数据：名称、版本、输入输出 schema、权限、资源配额。
+- 记录技能元信息：版本、输入输出 schema、权限、计费标签。
 
-2. `Skill Executor`
-- `code`：沙箱执行（容器/WASM）
-- `search`：统一 WebSearch adapter
-- `file`：受控文件系统能力
-- `analysis`：数据处理（SQL/Pandas/指标模板）
+2. `Skill Runtime`
+- `code`：容器/WASM 沙箱
+- `search`：统一 WebSearch Adapter
+- `file`：受控文件系统
+- `data`：SQL/Python 分析执行器
 
-3. `Policy Engine`
-- 按用户、租户、场景限制 skill 调用。
+3. `Policy & Security`
+- 资源配额、网络白名单、敏感操作审批。
 
-4. `Audit/Trace`
-- 记录每次 skill 调用的输入、输出、时长、成本、风险标记。
+4. `Audit & Observability`
+- 全量调用日志 + 成本 + 时延 + 失败原因。
 
-## 4. Marketplace 改造可行性
+## 3. 直接借鉴 MemOS 的部分
 
-## 4.1 结论
+1. MCP 工具治理：`readonly`、`toolsets`、`include/exclude`。
+2. 鉴权模型：PAT/JWT + 可见性校验。
+3. 业务复用策略：MCP handler 调主业务层，减少双实现。
 
-可以改造成 skills marketplace，但这部分在 MemOS 当前代码中是“空白区”，需要你自己建设。
+## 4. 建议的 Skill 执行契约
 
-### 4.2 推荐最小可用版本（MVP）
+```json
+{
+  "name": "biz_analytics_skill",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "dataset": {"type": "string"},
+      "metrics": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["dataset", "metrics"]
+  },
+  "permissions": {
+    "network": false,
+    "filesystem": "scoped",
+    "max_cpu_sec": 30,
+    "max_memory_mb": 512
+  }
+}
+```
 
-1. 发布包规范
-- `skill.yaml`（元信息 + 权限声明）
-- `manifest.json`（entrypoint + runtime）
-- `README.md`（使用示例）
+## 5. Marketplace 最小版本（MVP）
 
-2. 安装链路
-- 上传包 -> 签名校验 -> 静态扫描 -> 入库 -> 启用
+### 5.1 需要的最小能力
 
-3. 运行链路
-- 编排器选 skill -> 校验 policy -> executor 执行 -> 输出标准化
+1. 发布：上传 skill 包 + manifest 校验。
+2. 安装：签名校验 + 安全扫描 + 入库启用。
+3. 调用：编排器选 skill -> policy 校验 -> runtime 执行。
+4. 运营：版本管理 + 调用统计 + 下线机制。
 
-4. 商业链路
-- 技能版本管理、兼容矩阵、评分反馈、调用计费（可后置）
+### 5.2 先不要做的
 
-### 4.3 安全红线
+1. 复杂分润和商业计费。
+2. 过早支持太多 runtime 类型。
+3. 无审计的任意代码执行。
 
-- 代码执行 skill 必须强沙箱（网络/文件/CPU/内存/超时）
-- 外部 API skill 要做密钥托管与最小权限
-- 所有 skill 输入输出都要审计可回放
+## 6. 你的“拿来即用”实施顺序
 
-## 5. 给你场景的具体映射
+1. 先复制 MemOS MCP 工具治理模式到你的 Skill Gateway。
+2. 优先上线 `code_exec_skill` 和 `web_search_skill` 两种 runtime。
+3. 再做 `data_analysis_skill` 与 `biz_analytics_skill` 模板化。
+4. 最后再做 marketplace 的上架/审核/评分。
 
-你关心的 skill 类型建议落地为：
-
-1. `code_exec_skill`
-- 用于代码执行和自动化脚本。
-
-2. `web_search_skill`
-- 统一搜索 API（可接 Google/Bing/自建搜索）。
-
-3. `file_ops_skill`
-- 文件归档、重命名、结构化整理。
-
-4. `data_analysis_skill`
-- CSV/Excel/SQL 分析，输出图表和结论。
-
-5. `biz_analytics_skill`
-- 商科指标（增长、留存、转化、CAC/LTV）模板化计算。
-
-## 6. 一句话结论
-
-MemOS 提供的是“工具化接入与治理框架”，不是“通用技能执行引擎”；你可以把它当作 skill 网关底盘，再补 runtime 和 marketplace。
+一句话：MemOS 是很好的“skill 网关骨架”，但执行引擎和市场体系要你自己补。
